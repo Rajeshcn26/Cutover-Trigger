@@ -1,0 +1,25 @@
+name: Cutover Trigger
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  process-cutover:
+    if: contains(github.event.comment.body, '/cutover')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.2
+
+      - name: Run cutover processor
+        run: ruby .github/scripts/process_cutover_command.rb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
