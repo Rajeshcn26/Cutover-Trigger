@@ -1,4 +1,4 @@
-name: Handle /cutover or /archive command
+name: Handle migration commands
 
 on:
   issue_comment:
@@ -10,27 +10,44 @@ permissions:
 
 jobs:
   handle-command:
-    if: contains(github.event.comment.body, '/cutover') || contains(github.event.comment.body, '/archive')
+    if: |
+      contains(github.event.comment.body, '/cutover') ||
+      contains(github.event.comment.body, '/archive') ||
+      contains(github.event.comment.body, '/remigrate') ||
+      contains(github.event.comment.body, '/migrate') ||
+      contains(github.event.comment.body, '/dryrun') ||
+      contains(github.event.comment.body, '/test')
     runs-on: ubuntu-latest
 
     steps:
-      - name: Validate command format
-        id: validate
+      - name: Extract command and snow ID
+        id: extract
         env:
           COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
-          echo "Comment: $COMMENT_BODY"
+          COMMAND=$(echo "$COMMENT_BODY" | awk '{print $1}' | sed 's|/||')
+          echo "command=$COMMAND" >> "$GITHUB_OUTPUT"
 
-          if [[ "$COMMENT_BODY" =~ ^/(cutover|archive)[[:space:]]+INC[0-9]{7}$ ]]; then
-            echo "Valid format"
-            echo "valid=true" >> "$GITHUB_OUTPUT"
-            COMMAND=$(echo "$COMMENT_BODY" | awk '{print $1}' | sed 's|/||')
-            SNOW_ID=$(echo "$COMMENT_BODY" | grep -oE 'INC[0-9]{7}')
-            echo "command=$COMMAND" >> "$GITHUB_OUTPUT"
+          # Extract SNOW ID if present (e.g., TKT########)
+          if [[ "$COMMENT_BODY" =~ TKT[0-9]{8} ]]; then
+            SNOW_ID=$(echo "$COMMENT_BODY" | grep -oE 'TKT[0-9]{8}')
             echo "snow_id=$SNOW_ID" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate /cutover and /archive format
+        id: validate
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMAND: ${{ steps.extract.outputs.command }}
+        run: |
+          if [[ "$COMMAND" == "cutover" || "$COMMAND" == "archive" ]]; then
+            if [[ "$COMMENT_BODY" =~ ^/(cutover|archive)[[:space:]]+TKT[0-9]{8}$ ]]; then
+              echo "valid=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "valid=false" >> "$GITHUB_OUTPUT"
+            fi
           else
-            echo "Invalid format"
-            echo "valid=false" >> "$GITHUB_OUTPUT"
+            echo "valid=true" >> "$GITHUB_OUTPUT"  # Always valid for other commands
           fi
 
       - name: Comment on issue if invalid
@@ -43,38 +60,35 @@ jobs:
 
             ✅ **Correct format examples:**
             ```
-            /cutover INC1234567
-            /archive INC7654321
+            /cutover TKT63652208
+            /archive TKT63679901
             ```
 
-            ❓ Must start with `/cutover` or `/archive` followed by a space and a valid `INC` number (7 digits).
+            ❓ Must start with `/cutover` or `/archive` followed by a space and a valid `TKT` number (8 digits).
 
-      - name: Exit on invalid command
+      - name: Exit if command is invalid
         if: steps.validate.outputs.valid == 'false'
-        run: |
-          echo "Exiting due to invalid format"
-          exit 1
+        run: exit 1
 
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GH_PAT }}
 
-      - name: Create SNOW ID label and add to issue
+      - name: Create TKT label and add to issue
+        if: |
+          steps.validate.outputs.valid == 'true' &&
+          (steps.extract.outputs.command == 'cutover' || steps.extract.outputs.command == 'archive')
         uses: actions/github-script@v7
         with:
           script: |
-            const snowId = "${{ steps.validate.outputs.snow_id }}";
+            const snowId = "${{ steps.extract.outputs.snow_id }}";
             const issueNumber = context.payload.issue.number;
             const owner = context.repo.owner;
             const repo = context.repo.repo;
 
             try {
-              await github.rest.issues.getLabel({
-                owner,
-                repo,
-                name: snowId
-              });
+              await github.rest.issues.getLabel({ owner, repo, name: snowId });
               console.log(`Label '${snowId}' already exists.`);
             } catch (error) {
               if (error.status === 404) {
@@ -83,7 +97,7 @@ jobs:
                   repo,
                   name: snowId,
                   color: 'ededed',
-                  description: 'Auto-generated SNOW ID label'
+                  description: 'Auto-generated TKT label'
                 });
                 console.log(`Label '${snowId}' created.`);
               } else {
