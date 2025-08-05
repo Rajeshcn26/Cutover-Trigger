@@ -1,0 +1,105 @@
+name: Handle /cutover command
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read   # Required for checkout
+  issues: write    # Required to create labels and comment
+
+jobs:
+  cutover:
+    if: contains(github.event.comment.body, '/cutover')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate /cutover format
+        id: validate
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          echo "Comment: $COMMENT_BODY"
+          if [[ "$COMMENT_BODY" =~ ^/cutover[[:space:]]+INC[0-9]{7}$ ]]; then
+            echo "Valid format"
+            echo "valid=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Invalid format"
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comment on issue if invalid
+        if: steps.validate.outputs.valid == 'false'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ github.event.issue.number }}
+          body: |
+            ⚠️ **Invalid cutover command format.**
+
+            ✅ **Correct format:**
+            ```
+            /cutover INC1234567
+            ```
+
+            ❓ Please use the correct format — must start with `/cutover` followed by a space and a valid `INC` number (7 digits).
+
+      - name: Exit on invalid command
+        if: steps.validate.outputs.valid == 'false'
+        run: |
+          echo "Exiting due to invalid format"
+          exit 1
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}  # Use PAT if this fails
+
+      - name: Extract SNOW ID
+        id: extract
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          SNOW_ID=$(echo "$COMMENT_BODY" | grep -oE 'INC[0-9]{7}')
+          echo "Found SNOW ID: $SNOW_ID"
+          echo "snow_id=$SNOW_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Create SNOW ID label and add to issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labelName = "${{ steps.extract.outputs.snow_id }}";
+            const issueNumber = context.payload.issue.number;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            try {
+              // Check if label exists
+              await github.rest.issues.getLabel({
+                owner,
+                repo,
+                name: labelName
+              });
+              console.log(`Label '${labelName}' already exists.`);
+            } catch (error) {
+              if (error.status === 404) {
+                // Create label
+                await github.rest.issues.createLabel({
+                  owner,
+                  repo,
+                  name: labelName,
+                  color: 'ededed',
+                  description: 'Auto-generated SNOW ID label'
+                });
+                console.log(`Label '${labelName}' created.`);
+              } else {
+                throw error;
+              }
+            }
+
+            // Add label to the issue
+            await github.rest.issues.addLabels({
+              owner,
+              repo,
+              issue_number: issueNumber,
+              labels: [labelName]
+            });
