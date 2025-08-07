@@ -1,0 +1,214 @@
+name: Bulk Operations on Label
+
+on:
+  issues:
+    types:
+      - labeled
+
+permissions:
+  issues: write
+
+jobs:
+  add-comment-migrate:
+    if: github.event.label.name == 'cmd-migrate'
+    runs-on:
+      group: icelinux-small
+    steps:
+      - name: Get Siphon App Token
+        id: siphon-app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.SIPHON_APP_ID }}
+          private-key: ${{ secrets.SIPHON_APP_PRIVATE_KEY }}
+
+      - name: Add comment
+        uses: actions/github-script@v7
+        with:
+          # To trigger the GEI migration workflow, the comment
+          # cannot be left by github-actions
+          github-token: ${{ steps.siphon-app-token.outputs.token }}
+          script: |
+            const body = `/migrate`
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              name: 'cmd-migrate'
+            });
+
+  add-comment-dryrun:
+    if: github.event.label.name == 'cmd-dryrun'
+    runs-on:
+      group: icelinux-small
+    steps:
+      - name: Get Siphon App Token
+        id: siphon-app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.SIPHON_APP_ID }}
+          private-key: ${{ secrets.SIPHON_APP_PRIVATE_KEY }}
+
+      - name: Add comment
+        uses: actions/github-script@v7
+        with:
+          # To trigger the GEI migration workflow, the comment
+          # cannot be left by github-actions
+          github-token: ${{ steps.siphon-app-token.outputs.token }}
+          script: |
+            const body = `/dryrun`
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              name: 'cmd-dryrun'
+            });
+
+  add-comment-remigrate:
+    if: github.event.label.name == 'cmd-remigrate'
+    runs-on:
+      group: icelinux-small
+    steps:
+      - name: Get Siphon App Token
+        id: siphon-app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.SIPHON_APP_ID }}
+          private-key: ${{ secrets.SIPHON_APP_PRIVATE_KEY }}
+
+      - name: Add comment
+        uses: actions/github-script@v7
+        with:
+          # To trigger the GEI migration workflow, the comment
+          # cannot be left by github-actions
+          github-token: ${{ steps.siphon-app-token.outputs.token }}
+          script: |
+            const body = `/remigrate`
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              name: 'cmd-remigrate'
+            });
+
+  add-comment-archive:
+    if: github.event.label.name == 'cmd-archive'
+    runs-on:
+      group: icelinux-small
+    steps:
+      - name: Get Siphon App Token
+        id: siphon-app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.SIPHON_APP_ID }}
+          private-key: ${{ secrets.SIPHON_APP_PRIVATE_KEY }}
+
+      - name: Add comment
+        uses: actions/github-script@v7
+        with:
+          # To trigger the workflow, the comment
+          # cannot be left by github-actions
+          github-token: ${{ steps.siphon-app-token.outputs.token }}
+          script: |
+            const body = `/archive`
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              name: 'cmd-archive'
+            });
+
+  add-comment-update-issue:
+    if: github.event.label.name == 'cmd-update-issue'
+    runs-on:
+      group: icelinux-smallq
+    steps:
+      - name: Get Siphon App Token
+        id: siphon-app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.SIPHON_APP_ID }}
+          private-key: ${{ secrets.SIPHON_APP_PRIVATE_KEY }}
+
+      - name: Add comment
+        uses: actions/github-script@v7
+        with:
+          # To trigger the workflow, the comment
+          # cannot be left by github-actions
+          github-token: ${{ steps.siphon-app-token.outputs.token }}
+          script: |
+            const body = `/update-issue`
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              name: 'cmd-update-issue'
+            });
+
+  add-comment-cutover:
+    if: github.event.label.name == 'cmd-cutover'
+    runs-on:
+      group: icelinux-small
+    steps:
+      - name: Get Siphon App Token
+        id: siphon-app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.SIPHON_APP_ID }}
+          private-key: ${{ secrets.SIPHON_APP_PRIVATE_KEY }}
+
+      - name: Add comment
+        uses: actions/github-script@v7
+        with:
+          # To trigger the workflow, the comment
+          # cannot be left by github-actions
+          github-token: ${{ steps.siphon-app-token.outputs.token }}
+          script: |
+            const body = `/cutover`
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              name: 'cmd-cutover'
+            });
