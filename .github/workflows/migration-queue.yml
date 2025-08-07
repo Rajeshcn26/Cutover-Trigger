@@ -1,0 +1,542 @@
+name: Queue Migrate Repository
+run-name: Migrate Queue Repo - ${{ github.event.issue.title }}
+
+on:
+  issues:
+    types: [ labeled ]
+
+jobs:
+  migration:
+    if: contains(github.event.issue.labels.*.name, 'queue-in-progress')&& !contains(github.event.issue.labels.*.name, 'user-do-not-migrate') && !contains(github.event.issue.labels.*.name, 'status-archive-success')
+    runs-on:
+      group: ghec-migration
+    steps:
+      - name: 'Store Start Time'
+        id: start-time
+        run: echo "START_TIME=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Get Siphon App Token
+        if: always()
+        id: siphon-app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{vars.SIPHON_APP_ID}}
+          private-key: ${{secrets.SIPHON_APP_PRIVATE_KEY}}
+
+      - name: Show Rate Limit for PAT
+        run: |
+          curl -s -H "Authorization: Bearer ${{ secrets.GH_PAT }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/rate_limit \
+            | tee rate_limit_pat.json | jq
+          core_used=$(jq '.resources.core.used' rate_limit_pat.json)
+          core_remaining=$(jq '.resources.core.remaining' rate_limit_pat.json)
+          graphql_used=$(jq '.resources.graphql.used' rate_limit_pat.json)
+          graphql_remaining=$(jq '.resources.graphql.remaining' rate_limit_pat.json)
+          echo "::notice:: BEFORE: API Rate Limit: PAT: core: used=$core_used, remaining=$core_remaining :: graphql: used=$graphql_used, remaining=$graphql_remaining"
+
+      - name: Show Rate Limit for App Token
+        run: |
+          curl -s -H "Authorization: Bearer ${{ steps.siphon-app-token.outputs.token }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/rate_limit \
+            | tee rate_limit_app.json | jq
+          core_used=$(jq '.resources.core.used' rate_limit_app.json)
+          core_remaining=$(jq '.resources.core.remaining' rate_limit_app.json)
+          graphql_used=$(jq '.resources.graphql.used' rate_limit_app.json)
+          graphql_remaining=$(jq '.resources.graphql.remaining' rate_limit_app.json)
+          echo "::notice:: BEFORE: API Rate Limit: APP TOKEN: core: used=$core_used, remaining=$core_remaining :: graphql: used=$graphql_used, remaining=$graphql_remaining"
+
+      - name: Setup Ruby
+        uses: ./.github/actions/setup-ruby
+        with:
+          username: ${{ secrets.ARTIF_USER }}
+          password: ${{ secrets.ARTIF_TOKEN }}
+
+      - name: Install bbs2gh GH Extension
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh extension install github/gh-bbs2gh
+
+      - name: "Setup SSH for Bitbucket"
+        shell: bash
+        env:
+          BB_SSH_HOST: ${{ vars.BB_SSH_HOST }}
+          BB_SSH_PORT: ${{ vars.BB_SSH_PORT }}
+        run: |
+          set -euo pipefail
+          pwd
+          PORT="${BB_SSH_PORT:-22}"
+          HOST="${BB_SSH_HOST}"
+          echo "==> Ensuring ~/.ssh directory exists"
+          mkdir -p ~/.ssh
+          echo "==> Writing SSH private key"
+          printf '%s\n' "${{ secrets.BB_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ls -l ~/.ssh/id_rsa || echo "❌ id_rsa not found or bad perms"
+          file ~/.ssh/id_rsa || echo "❌ id_rsa is not a valid key file"
+          echo "==> Checking SSH port accessibility"
+          if ! nc -vz "$HOST" "$PORT"; then
+            echo "❌ Cannot connect host on port $PORT"
+            exit 1
+          fi
+          echo "==> Scanning known hosts"
+          ssh-keyscan -T 10 -t rsa,ecdsa,ed25519 -p "$PORT" -H "$HOST" | tee ~/.ssh/known_hosts
+          echo "==> Testing SSH connectivity to $HOST"
+          ssh -T -p "$PORT" -i ~/.ssh/id_rsa svc-github@"$HOST"
+          echo "==> Testing SFTP connectivity to $HOST"
+          sftp -o IdentityFile=~/.ssh/id_rsa -o StrictHostKeyChecking=no -P "$PORT" svc-github@"$HOST"
+
+      - name: Get Last Comment on Issue
+        id: last-comment
+        env:
+          ISSUE_ID: ${{ github.event.issue.number }}
+          GH_ORG: ${{ github.repository_owner }}
+          GH_REPO: ${{ github.repository }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PAT }}
+          script: |
+            const issueNumber = parseInt(process.env.ISSUE_ID, 10);
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber
+              }
+            );
+            if (comments.length === 0) {
+              core.setOutput("last_comment", "");
+              return;
+            }
+            comments.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            const lastComment = comments[0];
+            core.setOutput("last_comment", lastComment.body);
+            core.setOutput("last_comment_id", lastComment.id);
+
+      - name: Migrate Repo
+        id: run-migration-script
+        shell: bash
+        env:
+          COMMENT_BODY: ${{ steps.last-comment.outputs.last_comment }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_ID: ${{ github.event.issue.id }}
+          BB_SERVER_URL: ${{ vars.BB_SERVER_URL }}
+          BB_ACCT_TOKEN: ${{ secrets.BB_ACCT_TOKEN }}
+          BB_ACCT_PASSWORD: ${{ secrets.BB_ACCT_PASSWORD }}
+          BB_ACCT_USER: ${{ vars.BB_ACCT_USER }}
+          BB_SSH_USER: ${{ vars.BB_SSH_USER }}
+          BB_SSH_KEY: "/home/runner/.ssh/id_rsa"
+          BB_SSH_HOST: ${{ vars.BB_SSH_HOST }}
+          BB_SSH_PORT: ${{ vars.BB_SSH_PORT }}
+          BB_SHARED_HOME_DIR: ${{ vars.BB_SHARED_HOME_DIR || '/var/atlassian/application-data/bitbucket/shared' }}
+          SANDBOX_ORG: ${{ vars.SANDBOX_ORG || 'X-SANDBOX' }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          echo "Triggered by issue: https://github.com/${GITHUB_REPOSITORY}/issues/${{ github.event.issue.number }}"
+          comment=$(echo "$COMMENT_BODY" | base64)
+          issue_body_b64=$(echo "$ISSUE_BODY" | base64)
+          ruby bb_bin/migrate_repos.rb --comment "$comment" --body "$issue_body_b64" || (echo "::error::Migration failed" && exit 1)
+          echo "::notice:: Triggered by issue: https://github.com/${GITHUB_REPOSITORY}/issues/${{ github.event.issue.number }}"
+
+      - name: Remove labels from issue
+        if: always() && github.event_name == 'issues'
+        run: |
+          gh issue edit "$ISSUE_NUMBER" --remove-label "queued" --remove-label "queue-in-progress"
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+
+      - name: Add Custom Properties to Repo (on migration)
+        if: success() && contains('/migrate /remigrate /dryrun /cutover', steps.last-comment.outputs.last_comment)
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          issue_body=$(echo "$ISSUE_BODY" | base64)
+          ruby bb_bin/add_custom_properties_to_repo.rb --body "$issue_body"
+
+      - name: Migrate LFS Content
+        if: success() && contains(github.event.issue.labels.*.name, 'lfs')
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          SANDBOX_ORG: ${{ vars.SANDBOX_ORG || 'X-SANDBOX'}}
+          BB_SERVER_URL: ${{ vars.BB_SERVER_URL }}
+          BB_ACCT_TOKEN: ${{ secrets.BB_ACCT_TOKEN }}
+          BB_ACCT_USER: ${{ vars.BB_ACCT_USER }}
+          BB_ACCT_PASSWORD: ${{ secrets.BB_ACCT_PASSWORD }}
+          COMMENT_BODY: ${{ steps.last-comment.outputs.last_comment }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          comment=$(echo "$COMMENT_BODY" | base64)
+          issue_body_b64=$(echo "$ISSUE_BODY" | base64)
+          ruby bb_bin/migrate_lfs.rb --comment "$comment" --body "$issue_body_b64"
+
+      - name: Migrate Webhooks
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          SANDBOX_ORG: ${{ vars.SANDBOX_ORG || 'X-SANDBOX'}}
+          BB_SERVER_URL: ${{ vars.BB_SERVER_URL }}
+          BB_ACCT_TOKEN: ${{ secrets.BB_ACCT_TOKEN }}
+          BB_ACCT_USER: ${{ vars.BB_ACCT_USER }}
+          BB_ACCT_PASSWORD: ${{ secrets.BB_ACCT_PASSWORD }}
+          COMMENT_BODY: ${{ steps.last-comment.outputs.last_comment }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          comment=$(echo "$COMMENT_BODY" | base64)
+          issue_body_b64=$(echo "$ISSUE_BODY" | base64)
+          ruby client/frozen/migrate_webhooks.rb --comment "$comment" --body "$issue_body_b64"
+
+      - name: Upload log files as artifacts
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ steps.siphon-app-token.outputs.token }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-logs
+          path: ./logs
+
+      - name: Grep logs for keywords
+        id: scan_logs
+        if: always()
+        run: |
+          set +e
+          shopt -s nullglob
+          found_errors=false
+          rm -f error-logs.txt migration-logs.txt debug-logs.txt success-logs.txt
+          grep -H -E "startRepositoryMigration" logs/verbose/*.log >> debug-logs.txt || true
+          grep -Hi -E "WARN|ERROR" logs/migration*.log | grep -vi "Allow Forking" | sed 's|logs/migration-log_||' >> migration-logs.txt || true
+          grep -H -E "\-\- Migration complete" logs/migration*.log | sed 's|logs/migration-log_||' >> success-logs.txt || true
+          queued_count=0
+          queued_count=$(grep -c "State: QUEUED." logs/verbose/*.log || true)
+          echo "queued_count=$queued_count"
+          queued_seconds=$((queued_count * 10))
+          echo "::notice:: Migration job queued for $queued_seconds seconds"
+          grep -Hi -E "ERROR" logs/*__*.log >> error-logs.txt
+          grep -Hi -E "ERROR" logs/migration*.log | grep -vi "Allow Forking" >> error-logs.txt
+          if grep -qiw "ERROR" migration_result.txt; then
+            echo "migration_result.txt: $(grep -iw 'ERROR' migration_result.txt)" >> error-logs.txt
+          fi
+          if [[ -s error-logs.txt ]]; then
+            found_errors=true
+          fi
+          echo "found_errors=${found_errors,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Create Sub-issue for errors
+        if: ${{ always() && steps.scan_logs.outputs.found_errors == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          GH_ORG: ${{ github.repository_owner }}
+          GH_REPO: ${{ github.repository }}
+          PARENT_ISSUE_ID: ${{ github.event.issue.number }}
+          ASSIGNEES: 'railoni_ICE,bhall_ICE,glamadrid_ICE,kmuren_ICE,praghunathan_ICE,lsurthani_ICE,rgupta9_ICE,jthera_ICE'
+        run: |
+          if [[ ! -f error-logs.txt ]]; then
+            echo "error-logs.txt does not exist. This indicates a logic error in the workflow."
+            exit 1
+          fi
+          raw_title=$(echo "${{ steps.last-comment.outputs.last_comment }}" | head -n1 | sed 's/[\,]/,/g')
+          formatted_title="$(echo "${raw_title:0:1}" | tr '[:lower:]' '[:upper:]')${raw_title:1}"
+          export ISSUE_TITLE="${formatted_title} Failure"
+          workflow_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          error_log_content=$(cat error-logs.txt)
+          combined_body=$(printf '[Workflow run](%s)\n\n~~~\n%s\n~~~' "$workflow_url" "$error_log_content")
+          export ISSUE_BODY=$(echo -n "$combined_body" | base64 -w 0)
+          export LABELS="${formatted_title}-failure"
+          ruby lib/github_sub_issues.rb
+
+      - name: Update comment with script and artifact link
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ steps.siphon-app-token.outputs.token }}
+          COMMENT_ID: ${{ steps.last-comment.outputs.last_comment_id }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const content = fs.readFileSync('output/migration.sh', 'utf8');
+            const mergedLines = content.split('\n').reduce((acc, line) => {
+              if (acc.currentLine.endsWith('\\')) {
+                acc.currentLine = acc.currentLine.slice(0, -1) + line.trim();
+              } else {
+                if (acc.currentLine) {
+                  acc.lines.push(acc.currentLine);
+                }
+                acc.currentLine = line.trim();
+              }
+              return acc;
+            }, { lines: [], currentLine: '' }).lines;
+            const script = mergedLines.filter(line => line.includes('bbs2gh')).join('\n');
+            const errLog = fs.readFileSync('error-logs.txt', 'utf8').split('\n').map(line => `${line}`).join('\n');
+            const debugLog = fs.readFileSync('debug-logs.txt', 'utf8').split('\n').map(line => `${line}`).join('\n');
+            const migWarningsLog = fs.readFileSync('migration-logs.txt', 'utf8').split('\n').map(line => `${line}`).join('\n');
+            const successLog = fs.readFileSync('success-logs.txt', 'utf8').split('\n').map(line => `${line}`).join('\n');
+            const codeBlock             = "\n```\n";
+            const errLogTitle           = "\n-----\n##### Failure logs\n";
+            const successLogTitle       = "##### Repos Successfully Migrated\n";
+            const migWarningsLogTitle   = "##### Migration Warnings\n";
+            const debugLogTitle         = "##### Debug Log\n";
+            const scriptTitle           = "##### Migration Script that was executed:\n";
+            const comment_id = parseInt(process.env.COMMENT_ID, 10);
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const { data: currentComment } = await github.rest.issues.getComment({owner,repo,comment_id});
+            const artifactLink = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            const newCommentBody = `${currentComment.body}\n${errLogTitle}${codeBlock}${errLog}${codeBlock}${successLogTitle}${codeBlock}${successLog}${codeBlock}${migWarningsLogTitle}${codeBlock}${migWarningsLog}${codeBlock}${debugLogTitle}${codeBlock}${debugLog}${codeBlock}${scriptTitle}${codeBlock}${script}${codeBlock}\n\n[Migration run artifacts](${artifactLink})`;
+            await github.rest.issues.updateComment({owner,repo,comment_id,body: newCommentBody});
+
+      - name: checkin successful repos list
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ steps.siphon-app-token.outputs.token }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: |
+          git config user.email "${{ vars.SIPHON_APP_ID }}+${{ vars.SIPHON_APP_NAME }}[bot]@users.noreply.github.com"
+          git config user.name "${{ vars.SIPHON_APP_NAME }}[bot]"
+          git pull
+          cat "success-logs.txt" >> "output/success-logs.txt"
+          git add -f "output/success-logs.txt" # add current success repos to master list that gets persisted...
+          git commit -m "update list of repos that have succeeded: $ISSUE_TITLE" || true
+          commit_all_changes() {
+            if ! git diff --cached --quiet || ! git diff --quiet; then
+              git add -f "output/success-logs.txt"
+              git commit -m "auto-commit before rebase for: $ISSUE_TITLE" || true
+            fi
+          } # end of commit_all_changes method
+          max_attempts=10
+          attempt=1
+          until git push; do
+            if (( attempt >= max_attempts )); then
+              echo "git push failed after $attempt attempts, giving up."
+              exit 0
+            fi
+            echo "git push failed, attempt $attempt. Retrying after git pull and rebase..."
+            commit_all_changes # ensure no unstaged changes before rebase
+            git pull --rebase
+            attempt=$((attempt+1))
+            sleep 2
+          done # end of until git push block
+          exit 0
+
+      - name: Apply label based on migration result
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          COMMENT_BODY: ${{ steps.last-comment.outputs.last_comment }}
+          GITHUB_TOKEN: ${{ steps.siphon-app-token.outputs.token }}
+        with:
+          script: |
+            const fs = require('fs');
+            const result = fs.readFileSync('migration_result.txt', 'utf8').trim();
+            const command = process.env.COMMENT_BODY;
+            const issue_number = ${{ github.event.issue.number }};
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const comment_id = ${{ steps.last-comment.outputs.last_comment_id }};
+            const errLog = fs.readFileSync('error-logs.txt', 'utf8').split('\n').map(line => `${line}`).join('\n');
+            let labelsToAdd = [];
+            let archiveLabel = null;
+            let cutoverLabel = null;
+            if (errLog.includes("[ERROR] Bitbucket export failed")){
+              labelsToAdd.push("bb-failed-export");
+            }
+            if (command.includes('/dryrun')) {
+              labelsToAdd.push(result === 'Success' ? 'status-dryrun-success' : 'status-dryrun-failure');
+            } else if (command.includes('/migrate') || command.includes('/remigrate')) {
+              labelsToAdd.push(result === 'Success' ? 'status-migration-success' : 'status-migration-failure');
+              if (result === 'Success') {
+                const issueLabelsList = await github.rest.issues.listLabelsOnIssue({ owner, repo, issue_number });
+                const labelNames = issueLabelsList.data.map(l => l.name);
+                const hasJenkinsfile = labelNames.includes('status-jenkinsfile-true');
+                const hasWebhook = labelNames.includes('status-webhook-true');
+                if (hasJenkinsfile && hasWebhook) {
+                  labelsToAdd.push('status-cicdval-validation-required');
+                }
+              }
+            } else if (command.includes('/cutover')) {
+              if (result === 'Success') {
+                labelsToAdd.push('status-cutover-success', 'status-archive-success', 'status-migration-success');
+              } else {
+                labelsToAdd.push('status-cutover-failure');
+              }
+            }
+            const color = result === 'Success' ? '0E8A16' : 'B60205';
+            for (const label of labelsToAdd) {
+              await github.rest.issues.createLabel({ owner, repo, name: label, color }).catch(error => {
+                if (error.status !== 422) {
+                  throw error;
+                }
+              });
+            }
+            const issueLabels = await github.rest.issues.listLabelsOnIssue({ owner, repo, issue_number });
+            const unwantedLabels = issueLabels.data.filter(label => {
+              if (labelsToAdd.includes('status-dryrun-success') || labelsToAdd.includes('status-dryrun-failure')) {
+                return /^status-dryrun-/.test(label.name) && !labelsToAdd.includes(label.name) && label.name !== 'status-team' && label.name !== 'status-repo';
+              }
+              if (labelsToAdd.includes('status-migration-success') || labelsToAdd.includes('status-migration-failure')) {
+                return /^status-migration-/.test(label.name) && !labelsToAdd.includes(label.name) && label.name !== 'status-team' && label.name !== 'status-repo';
+              }
+              if (labelsToAdd.includes('status-cutover-success') || labelsToAdd.includes('status-cutover-failure')) {
+                return /^status-cutover-/.test(label.name) && !labelsToAdd.includes(label.name) && label.name !== 'status-team' && label.name !== 'status-repo';
+              }
+              if (/^user-/.test(label.name)) {
+                return false;
+              }
+              return false;
+            });
+            for (const label of unwantedLabels) {
+              console.log(`Removing unwanted label: ${label.name}`);
+              await github.rest.issues.removeLabel({
+                owner,
+                repo,
+                issue_number,
+                name: label.name
+              });
+            }
+            const labelsFilePath = 'labels_output.txt';
+            if (fs.existsSync(labelsFilePath)) {
+              const fileLabels = fs.readFileSync(labelsFilePath, 'utf8')
+                .split('\n')
+                .map(label => label.trim())
+                .filter(label => label.length > 0);
+              labelsToAdd.push(...fileLabels);
+              console.log(`Labels from file: ${fileLabels.join(', ')}`);
+            } else {
+              console.log('No labels file found.');
+            }
+            await github.rest.issues.addLabels({
+              owner,
+              repo,
+              issue_number,
+              labels: labelsToAdd
+            });
+
+      - name: Check migration result
+        if: always()
+        run: |
+          result=$(cat migration_result.txt)
+          if [[ "$result" != "Success" ]]; then
+            echo "::error::Migration failed"
+            exit 1
+          fi
+
+      - name: 'Store End Time'
+        if: success() && (contains('/dryrun', steps.last-comment.outputs.last_comment) || contains('/migrate', steps.last-comment.outputs.last_comment) || contains('/remigrate', steps.last-comment.outputs.last_comment))
+        run: echo "END_TIME=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: 'Calculate Duration & Update Issue Body'
+        if: success() && (contains('/dryrun', steps.last-comment.outputs.last_comment) || contains('/migrate', steps.last-comment.outputs.last_comment) || contains('/remigrate', steps.last-comment.outputs.last_comment))
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const startTime = parseInt(process.env.START_TIME, 10);
+            const endTime = parseInt(process.env.END_TIME, 10);
+            const duration = endTime - startTime;
+            const issue_number = ${{ github.event.issue.number }};
+            let issue_body = process.env.ISSUE_BODY;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            issue_body = issue_body.replace(/dry_run_duration_seconds:.*\n?/m, '');
+            issue_body = issue_body.replace(/migrate_duration_seconds:.*\n?/m, '');
+            issue_body = issue_body.replace(/remigrate_duration_seconds:.*\n?/m, '');
+            let durationLine = '';
+            if (process.env.COMMENT_BODY && process.env.COMMENT_BODY.includes('/dryrun')) {
+              durationLine = `dry_run_duration_seconds: ${duration}\n`;
+            } else if (process.env.COMMENT_BODY && process.env.COMMENT_BODY.includes('/migrate')) {
+              durationLine = `migrate_duration_seconds: ${duration}\n`;
+            } else if (process.env.COMMENT_BODY && process.env.COMMENT_BODY.includes('/remigrate')) {
+              durationLine = `remigrate_duration_seconds: ${duration}\n`;
+            }
+            await github.rest.issues.update({
+              owner,
+              repo,
+              issue_number,
+              body: `${durationLine}${issue_body}`
+            });
+
+      - name: 'Update Issue Labels w/ Duration'
+        if: success() && (contains('/dryrun', steps.last-comment.outputs.last_comment) || contains('/migrate', steps.last-comment.outputs.last_comment) || contains('/remigrate', steps.last-comment.outputs.last_comment))
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.siphon-app-token.outputs.token }}
+          script: |
+            const startTime = parseInt(process.env.START_TIME, 10);
+            const endTime = parseInt(process.env.END_TIME, 10);
+            const duration = endTime - startTime;
+            const issue_number = ${{ github.event.issue.number }};
+            let issue_labels = await github.rest.issues.listLabelsOnIssue({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number
+            });
+            issue_labels = issue_labels.data.map(label => label.name);
+            issue_labels = issue_labels.filter(label =>
+              !label.startsWith('dryrun-time-')
+            );
+            let labelName = '';
+            labelName = duration < 300  ? 'dryrun-time-5min' :
+                        duration < 600  ? 'dryrun-time-10min' :
+                        duration < 900  ? 'dryrun-time-15min' :
+                        duration < 1800 ? 'dryrun-time-30min' :
+                        duration < 2700 ? 'dryrun-time-45min' :
+                        duration < 3600 ? 'dryrun-time-60min' :
+                        duration < 5400 ? 'dryrun-time-90min' :
+                        duration < 7200 ? 'dryrun-time-120min' :
+                        'dryrun-time-over-120min';
+            if (labelName) {
+              issue_labels.push(labelName);
+            }
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number,
+              labels: issue_labels
+            });
+
+      - name: Add Codeowners and Custom Properties
+        if: success() && contains('/migrate /remigrate /dryrun /cutover', steps.last-comment.outputs.last_comment)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_ID: ${{ github.event.issue.number }}
+          GH_ORG: ${{ github.repository_owner }}
+          GH_REPO: ${{ env.MIGRATED_REPO_NAME }}
+          SIPHON_REPO: ${{ github.repository }}
+        run: |
+          ruby client/frozen/add_codeowners.rb
+          ruby client/frozen/add_custom_props.rb
+
+      - name: Show Rate Limit for PAT After Migration
+        run: |
+          curl -s -H "Authorization: Bearer ${{ secrets.GH_PAT }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/rate_limit \
+            | tee rate_limit_pat2.json | jq
+          core_used=$(jq '.resources.core.used' rate_limit_pat2.json)
+          core_remaining=$(jq '.resources.core.remaining' rate_limit_pat2.json)
+          graphql_used=$(jq '.resources.graphql.used' rate_limit_pat2.json)
+          graphql_remaining=$(jq '.resources.graphql.remaining' rate_limit_pat2.json)
+          echo "::notice:: AFTER: API Rate Limit: PAT: core: used=$core_used, remaining=$core_remaining :: graphql: used=$graphql_used, remaining=$graphql_remaining"
+
+      - name: Show Rate Limit for App Token After Migration
+        run: |
+          curl -s -H "Authorization: Bearer ${{ steps.siphon-app-token.outputs.token }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/rate_limit \
+            | tee rate_limit_app2.json | jq
+          core_used=$(jq '.resources.core.used' rate_limit_app2.json)
+          core_remaining=$(jq '.resources.core.remaining' rate_limit_app2.json)
+          graphql_used=$(jq '.resources.graphql.used' rate_limit_app2.json)
+          graphql_remaining=$(jq '.resources.graphql.remaining' rate_limit_app2.json)
+          echo "::notice:: AFTER: API Rate Limit: APP TOKEN: core: used=$core_used, remaining=$core_remaining :: graphql: used=$graphql_used, remaining=$graphql_remaining"
