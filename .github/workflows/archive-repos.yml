@@ -1,0 +1,125 @@
+name: Archive Repository
+run-name: Archive Repository - ${{ github.event.issue.title }}
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  archive-repository:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate archive command format
+        id: validate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = context.payload.comment;
+            if (!comment || !comment.body) {
+              core.setFailed('No comment found in the event payload.');
+              return;
+            }
+            const archiveCmd = /^\/archive\s+(TKT\d{8})$/;
+            const archiveOnlyCmd = /^\/archive\s*$/;
+            const body = comment.body.trim();
+
+            if (archiveOnlyCmd.test(body) || (body.startsWith('/archive') && !archiveCmd.test(body))) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: "❌ **Invalid command format.**\n\nPlease use the format:\n\n```\n/archive <snow-id>\n```\nExample:\n```\n/archive TKT12345678\n```\n\nThis will trigger the archive workflow and add your snow-id as an issue label."
+              });
+              core.setOutput('proceed', 'false');
+              core.setFailed('Invalid archive command format.');
+            } else if (archiveCmd.test(body)) {
+              const match = archiveCmd.exec(body);
+              core.setOutput('proceed', 'true');
+              core.setOutput('snow_id', match[1]);
+            } else {
+              core.setOutput('proceed', 'false');
+            }
+
+      - name: Add archive-in-progress label
+        if: steps.validate.outputs.proceed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['archive-in-progress']
+            });
+
+      - name: Checkout Code
+        if: steps.validate.outputs.proceed == 'true'
+        uses: actions/checkout@v4
+
+      - name: Setup Ruby
+        if: steps.validate.outputs.proceed == 'true'
+        uses: ./.github/actions/setup-ruby
+        with:
+          username: ${{ secrets.ARTIF_USER }}
+          password: ${{ secrets.ARTIF_TOKEN }}
+
+      - name: Run the archive script
+        if: steps.validate.outputs.proceed == 'true'
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          BB_ACCT_USER: ${{ vars.BB_ACCT_USER }}
+          BB_ACCT_PASSWORD: ${{ secrets.BB_ACCT_PASSWORD }}
+          BB_SERVER_URL: ${{ vars.BB_SERVER_URL }}
+        run: |
+          comment=$(echo "$COMMENT_BODY" | base64)
+          issue_body_b64=$(echo "$ISSUE_BODY" | base64)
+          ruby bb_bin/archive_repo.rb --comment "$comment" --body "$issue_body_b64" || (echo "::error::Migration failed" && exit 1)
+
+      - name: Add archive-success label
+        if: success() && steps.validate.outputs.proceed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              name: 'archive-in-progress'
+            });
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['status-archive-success']
+            });
+
+      - name: Add archive-failure label
+        if: failure() && steps.validate.outputs.proceed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              name: 'archive-in-progress'
+            });
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['status-archive-failure']
+            });
+
+      - name: Add snow-id label to issue
+        if: success() && steps.validate.outputs.proceed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['${{ steps.validate.outputs.snow_id }}']
+            });
