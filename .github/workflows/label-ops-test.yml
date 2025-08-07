@@ -1,0 +1,71 @@
+name: Label Ops
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  process-comment:
+    if: github.event.issue.pull_request == null
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check GitHub CLI version
+        run: gh --version
+
+      - name: Validate and extract /cutover ticket
+        id: validate_cutover
+        if: startsWith(github.event.comment.body, '/cutover')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🧐 Checking cutover command..."
+          cutover_command="${{ github.event.comment.body }}"
+
+          if [[ "$cutover_command" =~ ^/cutover[[:space:]]+TKT[0-9]{8}$ ]]; then
+            ticket=$(echo "$cutover_command" | awk '{print $2}')
+            echo "✅ Valid ticket: $ticket"
+            echo "ticket=$ticket" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Invalid cutover format."
+            gh issue comment ${{ github.event.issue.number }} \
+              --repo ${{ github.repository }} \
+              --body $'❌ The `/cutover` command you entered is not in the correct format.\n\n✅ **Expected format:** `/cutover TKT12345678`\n🔒 The ticket ID must start with `TKT` followed by exactly **8 digits**.\n\n📣 Please update your comment and try again using the correct format.'
+            exit 1
+          fi
+
+      # 🧪 Replace this with your actual workflow steps
+      - name: Dummy processing step
+        run: |
+          echo "🛠️ Performing workflow logic here..."
+
+      - name: Add SNOW Ticket as Label
+        if: steps.validate_cutover.outputs.ticket != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ticket="${{ steps.validate_cutover.outputs.ticket }}"
+          echo "🏷️ Adding label: $ticket"
+
+          # Check if the label exists
+          if ! gh label list --repo "${{ github.repository }}" | grep -q "^$ticket"; then
+            echo "🔖 Label '$ticket' does not exist. Creating it..."
+            gh label create "$ticket" \
+              --repo "${{ github.repository }}" \
+              --description "SNOW Ticket ID" \
+              --color "0075ca"
+          else
+            echo "✅ Label '$ticket' already exists."
+          fi
+
+          # Add label to the issue
+          gh issue edit ${{ github.event.issue.number }} \
+            --repo ${{ github.repository }} \
+            --add-label "$ticket"
