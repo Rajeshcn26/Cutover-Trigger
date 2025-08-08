@@ -1,0 +1,44 @@
+name: Cleanup Skipped Runs
+run-name: Cleanup Skipped Runs
+
+on:
+  workflow_dispatch:
+  schedule:
+    # - cron: "0 5-11 * * *"    # Runs every hour from 12 AM to 7 AM EST (5 AM to 11 AM UTC)
+    - cron: "0 12,15,18,21 * * 1-5" # Runs every 3 hours between 7 AM and 5 PM EST (12 PM, 3 PM, 6 PM, 9 PM UTC)
+  # issue_comment:
+  #   types: [created]
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write  # Required to delete workflow runs
+      contents: read
+
+    steps:
+      - name: Sleep
+        run: sleep 60
+
+      - name: Install GitHub CLI
+        run: |
+          sudo apt update && sudo apt install -y gh
+
+      - name: Authenticate GitHub CLI
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+
+      - name: Delete Skipped Workflow Runs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }}/actions/runs --paginate \
+            --jq '.workflow_runs[] | select(.conclusion=="skipped") | .id' |
+          while read run_id; do
+            echo "Deleting skipped workflow run with ID: $run_id"
+            gh api --method DELETE repos/${{ github.repository }}/actions/runs/$run_id
+          done
