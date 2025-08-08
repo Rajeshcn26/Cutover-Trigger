@@ -1,0 +1,29 @@
+name: Queue Run
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/10 * * * *'
+
+jobs:
+  add-comments:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v3
+
+      - name: Setup Ruby
+        uses: ./.github/actions/setup-ruby
+        with:
+          username: ${{ secrets.ARTIF_USER }}
+          password: ${{ secrets.ARTIF_TOKEN }}
+
+      - name: Install dependencies
+        run: gem install octokit
+
+      - name: Run add_dry_run script
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          SIPHON_REPO: ${{ github.repository }}
+          MAX: 10
+        run: ruby misc-scripts/run_queue.rb
