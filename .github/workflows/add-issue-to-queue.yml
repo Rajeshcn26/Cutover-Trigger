@@ -1,0 +1,34 @@
+name: Queue
+run-name: Queue Repo - ${{ github.event.issue.title }}
+
+on:
+  issue_comment:
+    types:
+      - created
+
+jobs:
+  add-queued-label:
+    if: (contains(fromJSON('["/migrate", "/remigrate", "/dryrun", "/cutover", "/test"]'), github.event.comment.body)) && (!contains(github.event.issue.labels.*.name, 'user-do-not-migrate') && !contains(github.event.issue.labels.*.name, 'status-archive-success'))
+    runs-on:
+      group: ghec-migration
+
+    permissions:
+      issues: write
+      contents: read
+
+    steps:
+      - name: Add "queued" Label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ "${{ github.event.issue.pull_request }}" != "" ]]; then
+            echo "This is a PR, skipping."
+            exit 0
+          fi
+
+          ISSUE_NUMBER="${{ github.event.issue.number }}"
+
+          gh api -X POST \
+            -H "Accept: application/vnd.github+json" \
+            /repos/${{ github.repository }}/issues/$ISSUE_NUMBER/labels \
+            -f labels[]="queued"
