@@ -1,4 +1,4 @@
-name: Archive Repository
+name: Archive Repository (Test)
 run-name: Archive Repository - ${{ github.event.issue.title }}
 
 on:
@@ -7,7 +7,9 @@ on:
 
 jobs:
   archive-repository:
+    if: contains(github.event.comment.body, '/archive')
     runs-on: ubuntu-latest
+
     steps:
       - name: Validate archive command format
         id: validate
@@ -19,25 +21,36 @@ jobs:
               core.setFailed('No comment found in the event payload.');
               return;
             }
-            const archiveCmd = /^\/archive\s+(TKT\d{8})$/;
-            const archiveOnlyCmd = /^\/archive\s*$/;
-            const body = comment.body.trim();
 
-            if (archiveOnlyCmd.test(body) || (body.startsWith('/archive') && !archiveCmd.test(body))) {
+            const body = comment.body.trim();
+            const archiveCmd = /^\/archive\s+(.+)$/;
+            const archiveOnlyCmd = /^\/archive\s*$/;
+
+            let labels = [];
+            if (archiveOnlyCmd.test(body)) {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.issue.number,
-                body: "❌ **Invalid command format.**\n\nPlease use the format:\n\n```\n/archive <snow-id>\n```\nExample:\n```\n/archive TKT12345678\n```\n\nThis will trigger the archive workflow and add your snow-id as an issue label."
+                body: "❌ **Invalid command format.**\n\nPlease use the format:\n\n```\n/archive <label1> <label2> ...\n```\nExample:\n```\n/archive TKT12345678 Email Excel\n```\n\nThis will trigger the archive workflow and add each as an issue label."
               });
               core.setOutput('proceed', 'false');
               core.setFailed('Invalid archive command format.');
             } else if (archiveCmd.test(body)) {
+              // Extract everything after "/archive"
               const match = archiveCmd.exec(body);
-              core.setOutput('proceed', 'true');
-              core.setOutput('snow_id', match[1]);
+              // Split by spaces, filter out empty strings
+              labels = match[1].split(/\s+/).filter(Boolean);
+              if (labels.length === 0) {
+                core.setOutput('proceed', 'false');
+                core.setFailed('No valid labels provided.');
+              } else {
+                core.setOutput('proceed', 'true');
+                core.setOutput('labels', JSON.stringify(labels));
+              }
             } else {
               core.setOutput('proceed', 'false');
+              core.setFailed('Unrecognized archive command format.');
             }
 
       - name: Add archive-in-progress label
@@ -56,25 +69,21 @@ jobs:
         if: steps.validate.outputs.proceed == 'true'
         uses: actions/checkout@v4
 
+      # You may comment out the Setup Ruby and Archive Script steps if not needed for testing
       - name: Setup Ruby
         if: steps.validate.outputs.proceed == 'true'
-        uses: ./.github/actions/setup-ruby
+        uses: ruby/setup-ruby@v1
         with:
-          username: ${{ secrets.ARTIF_USER }}
-          password: ${{ secrets.ARTIF_TOKEN }}
+          ruby-version: 3.2 # use any version you want for test
 
       - name: Run the archive script
         if: steps.validate.outputs.proceed == 'true'
-        env:
-          ISSUE_BODY: ${{ github.event.issue.body }}
-          COMMENT_BODY: ${{ github.event.comment.body }}
-          BB_ACCT_USER: ${{ vars.BB_ACCT_USER }}
-          BB_ACCT_PASSWORD: ${{ secrets.BB_ACCT_PASSWORD }}
-          BB_SERVER_URL: ${{ vars.BB_SERVER_URL }}
         run: |
-          comment=$(echo "$COMMENT_BODY" | base64)
-          issue_body_b64=$(echo "$ISSUE_BODY" | base64)
-          ruby bb_bin/archive_repo.rb --comment "$comment" --body "$issue_body_b64" || (echo "::error::Migration failed" && exit 1)
+          echo "Simulating archive script. Issue body: ${{ github.event.issue.body }}"
+          echo "Comment body: ${{ github.event.comment.body }}"
+          echo "Labels to be added: ${{ steps.validate.outputs.labels }}"
+          # exit 1 to simulate failure for testing
+          # exit 0 to simulate success for testing
 
       - name: Add archive-success label
         if: success() && steps.validate.outputs.proceed == 'true'
@@ -87,6 +96,7 @@ jobs:
               issue_number: context.issue.number,
               name: 'archive-in-progress'
             });
+
             await github.rest.issues.addLabels({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -105,6 +115,7 @@ jobs:
               issue_number: context.issue.number,
               name: 'archive-in-progress'
             });
+
             await github.rest.issues.addLabels({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -112,14 +123,15 @@ jobs:
               labels: ['status-archive-failure']
             });
 
-      - name: Add snow-id label to issue
+      - name: Add labels to issue
         if: success() && steps.validate.outputs.proceed == 'true'
         uses: actions/github-script@v7
         with:
           script: |
+            const labels = JSON.parse('${{ steps.validate.outputs.labels }}');
             await github.rest.issues.addLabels({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              labels: ['${{ steps.validate.outputs.snow_id }}']
+              labels: labels
             });
